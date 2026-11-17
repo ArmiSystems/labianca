@@ -390,7 +390,7 @@ function aberto(){
 
 /* --- estado --- */
 const novaM = () => ({ tam:null, sel:{}, ad:{} });
-const novo = () => ({ modo:null, ms:[novaM()], cur:0, beb:{}, cli:{nome:'',rua:'',bairro:'',ref:'',pag:'',troco:'',obs:''}, step:1 });
+const novo = () => ({ modo:null, ms:[novaM()], cur:0, beb:{}, cli:{nome:'',rua:'',num:'',bairro:'',ref:'',pag:'',troco:'',obs:''}, step:1 });
 let S = novo();
 const sab = {};
 try {
@@ -525,7 +525,7 @@ function renderFim(){
     <section class="card"><header><span class="med">${ico('nota')}</span><h3>Sua comanda</h3></header><div class="body">${comandaHTML(r)}</div></section>
     <section class="card"><header><span class="med">${ico('pessoa')}</span><h3>Seus dados<small>${ent?'entrega':'retirada no restaurante'}</small></h3></header><div class="body">
       ${f('nome','Seu nome','Como podemos te chamar?','autocomplete="name"')}
-      ${ent ? f('rua','Rua e número','Ex.: Rua das Flores, 120','autocomplete="street-address"') + `<div class="two">${f('bairro','Bairro','Bairro')}${f('ref','Referência','Opcional')}</div>`
+      ${ent ? f('rua','Rua','Ex.: Rua Major Bahia','autocomplete="address-line1"') + `<div class="two">${f('num','Número','Ex.: 274 ou s/n','inputmode="text" maxlength="10"')}${f('bairro','Bairro','Ex.: Centro')}</div>` + f('ref','Complemento / Referência','Opcional — apto, casa fundos…')
             : `<p class="note">Retire em: ${esc(CONFIG.restaurante.endereco)}</p>`}
       <div class="fld"><span id="lPag">Forma de pagamento</span>
         <div class="seg three pay" id="pag" role="group" aria-labelledby="lPag">${['Pix','Cartão','Dinheiro'].map(p=>`<button type="button" data-pag="${p}" aria-pressed="${c.pag===p}"><b>${p}</b></button>`).join('')}</div></div>
@@ -574,13 +574,22 @@ function valida1(){
   if (!S.modo){ S.step=1; show(); toast('Escolha Entrega ou Retirada.'); irPara($('#modo')); buzz(30); return false; }
   return true;
 }
+const letras = v => (String(v).match(/\p{L}/gu)||[]).length;
+const valorTroco = v => { const t = String(v||'').replace(/[^\d,.]/g,'').replace(/\.(?=\d{3}(\D|$))/g,'').replace(',','.'); const n = parseFloat(t); return isFinite(n) && n>0 ? C(n) : 0; };
 function valida3(){
-  if (!calc().sub){ toast('Seu pedido está vazio.'); return false; }
-  const need = ['nome'].concat(S.modo==='entrega'?['rua','bairro']:[]); let first;
+  const r = calc();
+  if (!r.sub){ toast('Seu pedido está vazio.'); return false; }
+  const c = S.cli, regras = [['nome', letras(c.nome)>=2]];
+  if (S.modo==='entrega') regras.push(['rua', letras(c.rua)>=3], ['num', c.num.trim().length>=1], ['bairro', letras(c.bairro)>=2]);
   $$('.fld.err').forEach(e=>e.classList.remove('err')); $('#pag').classList.remove('err');
-  need.forEach(k=>{ if(!S.cli[k].trim()){ const b=$(`[data-fld="${k}"]`); b.classList.add('err'); first = first||$('input',b); }});
-  if (first){ toast('Preencha os campos destacados.'); first.focus(); buzz(30); return false; }
+  let first;
+  regras.forEach(([k,ok])=>{ if(!ok){ const b=$(`[data-fld="${k}"]`); b.classList.add('err'); first = first||$('input',b); }});
+  if (first){ toast('Confira os campos destacados: nome, rua, número e bairro.'); first.focus(); buzz(30); return false; }
   if (!S.cli.pag){ $('#pag').classList.add('err'); toast('Escolha a forma de pagamento.'); irPara($('#pag')); buzz(30); return false; }
+  if (S.cli.pag==='Dinheiro' && S.cli.troco.trim()){
+    const t = valorTroco(S.cli.troco);
+    if (!t || t < r.total){ const b=$('[data-fld="troco"]'); b.classList.add('err'); $('input',b).focus(); toast(`O troco precisa ser para um valor acima de ${brl(r.total)}.`); buzz(30); return false; }
+  }
   return true;
 }
 function go(n){
@@ -589,27 +598,51 @@ function go(n){
 }
 
 /* --- mensagem do WhatsApp --- */
-function codigo(total,n){
-  const id = Math.random().toString(36).slice(2,6).toUpperCase().padEnd(4,'7');
-  let h = 0; for (const ch of id) h += ch.charCodeAt(0)*7;
-  const chk = ((h + total*13 + n*31) % 1296).toString(36).toUpperCase().padStart(2,'0');   // verificador para o bot conferir
-  return `${id}-${chk}`;
+// Nome/endereço: se o cliente digitou tudo MAIÚSCULO ou tudo minúsculo, ajusta para Iniciais Maiúsculas.
+function capitaliza(v){
+  const t = String(v||'').trim().replace(/\s+/g,' ');
+  if (t !== t.toUpperCase() && t !== t.toLowerCase()) return t;
+  return t.toLowerCase().split(' ').map((w,i)=> i>0 && /^(de|da|do|das|dos|e)$/.test(w) ? w : w.charAt(0).toUpperCase()+w.slice(1)).join(' ');
 }
+function dataSP(){
+  const p = Object.fromEntries(new Intl.DateTimeFormat('pt-BR',{timeZone:'America/Sao_Paulo',weekday:'short',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(new Date()).map(x=>[x.type,x.value]));
+  const sem = p.weekday.replace('.','');
+  return { dd:p.day, mm:p.month, hh:p.hour, mi:p.minute, sem: sem.charAt(0).toUpperCase()+sem.slice(1,3) };
+}
+/* Código do pedido: #DDMM-HHMM-XY (horário de Brasília).
+   X = letra aleatória; Y = verificador = ALFA[(soma dos 8 dígitos*7 + total em centavos + posição de X*13) % 24].
+   A automação pode recalcular Y para conferir se o total não foi alterado. */
+const ALFA = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+function codigo(d,total){
+  const dig = d.dd+d.mm+d.hh+d.mi, x = Math.floor(Math.random()*ALFA.length);
+  const soma = [...dig].reduce((a,b)=>a+ +b,0);
+  return `${d.dd}${d.mm}-${d.hh}${d.mi}-${ALFA[x]}${ALFA[(soma*7 + total + x*13) % ALFA.length]}`;
+}
+const PAG = { 'Pix':'💠 Pix', 'Cartão':'💳 Cartão', 'Dinheiro':'💵 Dinheiro' };
 function mensagem(){
-  const r = calc(), c = S.cli, cod = codigo(r.total, r.ms.length + r.nBeb), L = [];
-  L.push(`*PEDIDO #${cod} — ${CONFIG.restaurante.nome}*`, `Cliente: ${c.nome.trim()}`);
-  L.push(S.modo==='entrega' ? `Entrega: ${c.rua.trim()} – ${c.bairro.trim()}${c.ref.trim()?` (Ref.: ${c.ref.trim()})`:''}` : 'Retirada no restaurante');
-  r.ms.forEach((m,i)=>{
-    L.push('', `*${i+1}) Marmita ${m.tam==='G'?'GRANDE':'PEQUENA'} — ${brl(m.base)}*`);
-    m.linhas.forEach(l=>L.push(`• ${l[0]}: ${l[1].join(' + ')}`));
-    m.ex.forEach(e=>L.push(`+ ${e[0]} — ${brl(e[1])}`));
-  });
-  if (r.beb.length){ L.push('', '*Bebidas*'); r.beb.forEach(b=>L.push(`• ${b[0]} — ${brl(b[1])}`)); }
-  L.push('');
-  if (r.entrega) L.push(`Taxa de entrega: ${brl(r.entrega)}`);
-  L.push(`*TOTAL: ${brl(r.total)}*`);
-  L.push(`Pagamento: ${c.pag}${c.pag==='Dinheiro'&&c.troco.trim()?` (troco para R$ ${c.troco.trim().replace(/^R\$\s*/i,'')})`:''}`);
-  if (c.obs.trim()) L.push(`Obs.: ${c.obs.trim()}`);
+  const r = calc(), c = S.cli, d = dataSP(), cod = codigo(d, r.total), ent = S.modo==='entrega', L = [], SEP = '───────────────';
+  L.push(`*${ent?'🛵 ENTREGA':'🏪 RETIRADA'} · PEDIDO #${cod}*`, `📅 ${d.sem}, ${d.dd}/${d.mm} às ${d.hh}:${d.mi}`, '');
+  L.push(`👤 *${capitaliza(c.nome)}*`);
+  if (ent){
+    L.push(`📍 ${capitaliza(c.rua)}, ${c.num.trim()} – ${capitaliza(c.bairro)}`);
+    if (c.ref.trim()) L.push(`     Ref.: ${c.ref.trim().replace(/\s+/g,' ')}`);
+  }
+  if (r.ms.length){
+    L.push(SEP);
+    r.ms.forEach((m,i)=>{
+      if (i) L.push('');
+      L.push(`🍱 *MARMITA ${i+1} · ${m.tam==='G'?'GRANDE':'PEQUENA'}* — ${brl(m.base)}`);
+      m.linhas.forEach(l=>L.push(`• ${l[0]}: ${l[1].join(' + ')}`));
+      m.ex.forEach(e=>L.push(`➕ ${e[0]} — ${brl(e[1])}`));
+    });
+  }
+  if (r.beb.length){ L.push(SEP, '🥤 *BEBIDAS*'); r.beb.forEach(b=>L.push(`• ${b[0]} — ${brl(b[1])}`)); }
+  L.push(SEP);
+  if (r.entrega) L.push(`Itens: ${brl(r.sub)}`, `Entrega: ${brl(r.entrega)}`);
+  L.push(`💰 *TOTAL: ${brl(r.total)}*`);
+  const t = c.pag==='Dinheiro' ? valorTroco(c.troco) : 0;
+  L.push(`${PAG[c.pag]||c.pag}${t ? ` · troco para ${brl(t)}` : c.pag==='Dinheiro' ? ' · sem troco' : ''}`);
+  if (c.obs.trim()) L.push(`📝 Obs.: ${c.obs.trim().replace(/\s+/g,' ')}`);
   return { cod, msg: L.join('\n') };
 }
 
@@ -665,7 +698,7 @@ $('#bFin').addEventListener('click', e => {
   buzz([20,60,20]); setTimeout(()=>{ $('#done').classList.add('on'); $('#dWa').focus(); }, 350);
 });
 $('#dBack').onclick = () => $('#done').classList.remove('on');
-$('#dNew').onclick = () => { const c = S.cli; S = novo(); S.cli = Object.assign(S.cli,{nome:c.nome,rua:c.rua,bairro:c.bairro,ref:c.ref}); $('#done').classList.remove('on'); show(); window.scrollTo({top:0}); };
+$('#dNew').onclick = () => { const c = S.cli; S = novo(); S.cli = Object.assign(S.cli,{nome:c.nome,rua:c.rua,num:c.num,bairro:c.bairro,ref:c.ref}); $('#done').classList.remove('on'); show(); window.scrollTo({top:0}); };
 $('#dCopy').onclick = async e => { try { await navigator.clipboard.writeText(last.msg); e.currentTarget.textContent = 'Pedido copiado ✓'; } catch(x){ const r = document.createRange(); r.selectNodeContents($('#dMsg')); const s = getSelection(); s.removeAllRanges(); s.addRange(r); toast('Texto selecionado — copie e cole no WhatsApp.'); } };
 document.addEventListener('keydown', e => { if (e.key==='Escape') $('#done').classList.remove('on'); });
 
